@@ -474,16 +474,25 @@ fn reduce_operator(
     object: &Object,
     context: &Context,
 ) -> Result<Value> {
-    check_operator_properties(operator, object, |p| p == "initial" || parse_each_three(p).is_some())?;
+    check_operator_properties(operator, object, |p| {
+        p == "initial" || parse_each_three(p).is_some()
+    })?;
     if object.len() != 3 {
-        return Err(template_error!("$reduce must have exactly three properties"));
+        return Err(template_error!(
+            "$reduce must have exactly three properties"
+        ));
     }
 
     // Unwraps here are safe because the presence of the `each(..)` is checked above.
-    let each_prop = object.keys().filter(|k| k != &"$reduce" && k != &"initial").next().unwrap();
+    let each_prop = object
+        .keys()
+        .filter(|k| k != &"$reduce" && k != &"initial")
+        .next()
+        .unwrap();
 
-    let (acc_var, value_var, index_var) = parse_each_three(each_prop)
-        .ok_or_else(|| template_error!("$reduce requires each(identifier,identifier[,identifier]) syntax"))?;
+    let (acc_var, value_var, index_var) = parse_each_three(each_prop).ok_or_else(|| {
+        template_error!("$reduce requires each(identifier,identifier[,identifier]) syntax")
+    })?;
 
     let each_tpl = object.get(each_prop).unwrap();
 
@@ -512,9 +521,7 @@ fn reduce_operator(
                 });
             mapped
         }
-        _ => Err(template_error!(
-            "$reduce value must evaluate to an array"
-        )),
+        _ => Err(template_error!("$reduce value must evaluate to an array")),
     }
 }
 
@@ -553,9 +560,11 @@ fn find_operator(
                     return Ok(_render(&v, &subcontext)?);
                 }
             } else {
-                return Err(template_error!("$find can evaluate string expressions only"));
+                return Err(template_error!(
+                    "$find can evaluate string expressions only"
+                ));
             }
-        }   
+        }
         Ok(Value::DeletionMarker)
     } else {
         Err(template_error!("$find value must be an array"))

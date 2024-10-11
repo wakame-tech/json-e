@@ -1,7 +1,10 @@
 [package]
 name = "json-e"
 version = "4.8.0"
-authors = ["owlishDeveloper <bugzeeeeee@gmail.com>", "Alex Lopez <alex.lopez.zorzano@gmail.com>"]
+authors = [
+    "owlishDeveloper <bugzeeeeee@gmail.com>",
+    "Alex Lopez <alex.lopez.zorzano@gmail.com>",
+]
 edition = "2018"
 license = "MPL-2.0"
 repository = "https://github.com/json-e/json-e"

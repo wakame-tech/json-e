@@ -65,7 +65,7 @@ impl<'a> Context<'a> {
     }
 
     /// Insert a value into this context.
-    pub(crate) fn insert<K: Into<String>>(&mut self, k: K, v: Value) {
+    pub fn insert<K: Into<String>>(&mut self, k: K, v: Value) {
         self.content.insert(k.into(), v);
     }
 

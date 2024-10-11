@@ -35,7 +35,10 @@ lazy_static! {
             "strip",
             Value::Function(Function::new("strip", strip_builtin)),
         );
-        builtins.insert("range", Value::Function(Function::new("range", range_builtin)));
+        builtins.insert(
+            "range",
+            Value::Function(Function::new("range", range_builtin)),
+        );
         builtins.insert(
             "rstrip",
             Value::Function(Function::new("rstrip", rstrip_builtin)),
@@ -191,8 +194,10 @@ fn strip_builtin(_context: &Context, args: &[Value]) -> Result<Value> {
 }
 
 fn range_builtin(_context: &Context, args: &[Value]) -> Result<Value> {
-   if args.len() < 2 || args.len() > 3 {
-        return Err(interpreter_error!("range requires two arguments and optionally supports a third"));
+    if args.len() < 2 || args.len() > 3 {
+        return Err(interpreter_error!(
+            "range requires two arguments and optionally supports a third"
+        ));
     }
     let start = &args[0];
     let start: i64 = match start {
@@ -210,19 +215,28 @@ fn range_builtin(_context: &Context, args: &[Value]) -> Result<Value> {
         Some(val) => match val {
             Value::Number(n) if n.fract() == 0.0 => n.round() as i64,
             _ => return Err(interpreter_error!("invalid arguments to builtin: range")),
-        }
+        },
     };
 
     if step > 0 {
         let step: usize = step.try_into()?;
-        let range = (start..stop).step_by(step).map(|i| Value::Number(i as f64)).collect();
+        let range = (start..stop)
+            .step_by(step)
+            .map(|i| Value::Number(i as f64))
+            .collect();
         Ok(Value::Array(range))
     } else if step < 0 {
         let step: usize = (step * -1).try_into()?;
-        let range = (stop+1..=start).rev().step_by(step).map(|i| Value::Number(i as f64)).collect();
+        let range = (stop + 1..=start)
+            .rev()
+            .step_by(step)
+            .map(|i| Value::Number(i as f64))
+            .collect();
         Ok(Value::Array(range))
     } else {
-        return Err(interpreter_error!("invalid argument `step` to builtin: range"));
+        return Err(interpreter_error!(
+            "invalid argument `step` to builtin: range"
+        ));
     }
 }
 
