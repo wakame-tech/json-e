@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 use anyhow::{Error, Result};
+use futures::future::BoxFuture;
+use futures::TryFutureExt;
 use serde_json::{Map, Number, Value as SerdeValue};
 use std::collections::BTreeMap;
 use std::convert::{TryFrom, TryInto};
@@ -14,7 +16,7 @@ pub(crate) type Object = BTreeMap<String, Value>;
 #[derive(Clone)]
 pub struct Function {
     name: &'static str,
-    f: fn(&Context, &[Value]) -> Result<Value>,
+    f: for<'n> fn(&Context, &'n [Value]) -> BoxFuture<'n, Result<Value>>,
 }
 
 impl fmt::Debug for Function {
@@ -30,12 +32,16 @@ impl PartialEq for Function {
 }
 
 impl Function {
-    pub fn new(name: &'static str, f: fn(&Context, &[Value]) -> Result<Value>) -> Function {
+    pub fn new(
+        name: &'static str,
+        f: for<'ctx, 'n> fn(&Context, &'n [Value]) -> BoxFuture<'n, Result<Value>>,
+    ) -> Function {
         Function { name, f }
     }
 
     pub(crate) async fn call<'a>(&self, context: &Context<'a>, args: &[Value]) -> Result<Value> {
-        (self.f)(context, args)
+        let r = (self.f)(context, args).into_future();
+        r.await
     }
 }
 
