@@ -5,6 +5,7 @@ use crate::interpreter::{self, Context};
 use crate::op_props::{parse_by, parse_each, parse_each_three};
 use crate::value::{Object, Value};
 use anyhow::{bail, Result};
+use async_recursion::async_recursion;
 use nom::{
     branch::alt,
     bytes::complete::tag,
@@ -19,19 +20,22 @@ use std::convert::TryInto;
 use std::fmt::Write;
 
 /// Render the given JSON-e template with the given context.
-pub fn render(template: &SerdeValue, context: &SerdeValue) -> Result<SerdeValue> {
+pub async fn render(template: &SerdeValue, context: &SerdeValue) -> Result<SerdeValue> {
     let context = Context::from_serde_value(context, Some(&BUILTINS))?;
-    render_with_context(template, &context)
+    render_with_context(template, &context).await
 }
 
-pub fn render_with_context(template: &SerdeValue, context: &Context) -> Result<SerdeValue> {
+pub async fn render_with_context<'ctx>(
+    template: &SerdeValue,
+    context: &Context<'ctx>,
+) -> Result<SerdeValue> {
     let template: Value = template.into();
 
     // set "now" in context to a single current time for the duration of the render
     let mut context = context.child();
     context.insert("now", Value::String(now()));
 
-    match _render(&template, &context) {
+    match _render(&template, &context).await {
         // note that this will convert DeletionMarker into Null
         Ok(v) => Ok(v.try_into()?),
         Err(e) => Err(e),
@@ -39,11 +43,15 @@ pub fn render_with_context(template: &SerdeValue, context: &Context) -> Result<S
 }
 
 /// Inner, recursive render function.
-fn _render(template: &Value, context: &Context) -> Result<Value> {
+#[async_recursion]
+async fn _render<'ctx>(template: &Value, context: &Context<'ctx>) -> Result<Value> {
     /// render a value, shaping the result such that it can be used with
     /// `.filter_map(..).colect::<Result<_>>`.
-    fn render_or_deletion_marker(v: &Value, context: &Context) -> Option<Result<Value>> {
-        match _render(v, context) {
+    async fn render_or_deletion_marker<'ctx>(
+        v: &Value,
+        context: &Context<'ctx>,
+    ) -> Option<Result<Value>> {
+        match _render(v, context).await {
             Ok(Value::DeletionMarker) => None,
             Ok(rendered) => Some(Ok(rendered)),
             Err(e) => Some(Err(e)),
@@ -52,22 +60,25 @@ fn _render(template: &Value, context: &Context) -> Result<Value> {
 
     Ok(match template {
         Value::Number(_) | Value::Bool(_) | Value::Null => (*template).clone(),
-        Value::String(s) => Value::String(interpolate(s, context)?),
-        Value::Array(elements) => Value::Array(
-            elements
-                .into_iter()
-                .filter_map(|e| render_or_deletion_marker(e, context))
-                .collect::<Result<Vec<Value>>>()?,
-        ),
+        Value::String(s) => Value::String(interpolate(s, context).await?),
+        Value::Array(elements) => {
+            let mut ret: Vec<Value> = vec![];
+            for e in elements {
+                if let Some(e) = render_or_deletion_marker(&e, context).await {
+                    ret.push(e?);
+                }
+            }
+            Value::Array(ret)
+        }
         Value::Object(o) => {
             // first, see if this is a operator invocation
             for (k, v) in o.iter() {
                 // apply interpolation to key
                 // this allows keys that start with an interpolation to work
-                let interpolated = interpolate(&k, context)?;
+                let interpolated = interpolate(&k, context).await?;
                 let mut chars = interpolated.chars();
                 if chars.next() == Some('$') && chars.next() != Some('$') {
-                    if let Some(rendered) = maybe_operator(k, v, o, context)? {
+                    if let Some(rendered) = maybe_operator(k, v, o, context).await? {
                         return Ok(rendered);
                     }
                 }
@@ -78,10 +89,10 @@ fn _render(template: &Value, context: &Context) -> Result<Value> {
             for (k, v) in o.iter() {
                 // un-escape escaped operators
                 let k = if k.starts_with("$$") { &k[1..] } else { &k[..] };
-                match _render(v, context)? {
+                match _render(v, context).await? {
                     Value::DeletionMarker => {}
                     v => {
-                        result.insert(interpolate(k, context)?, v);
+                        result.insert(interpolate(k, context).await?, v);
                     }
                 };
             }
@@ -94,7 +105,7 @@ fn _render(template: &Value, context: &Context) -> Result<Value> {
 }
 
 /// Perform string interpolation on the given string.
-fn interpolate(mut source: &str, context: &Context) -> Result<String> {
+async fn interpolate<'ctx>(mut source: &str, context: &Context<'ctx>) -> Result<String> {
     // shortcut the common no-interpolation case
     if source.find('$') == None {
         return Ok(source.into());
@@ -115,7 +126,7 @@ fn interpolate(mut source: &str, context: &Context) -> Result<String> {
                         let msg = "unterminated ${..} expression";
                         bail!(msg);
                     }
-                    let eval_result = interpreter::evaluate(&parsed, context)?;
+                    let eval_result = interpreter::evaluate(&parsed, context).await?;
 
                     match eval_result {
                         Value::Number(n) => write!(&mut result, "{}", n)?,
@@ -155,39 +166,57 @@ fn interpolate(mut source: &str, context: &Context) -> Result<String> {
 }
 
 /// Evaluate the given expression and return the resulting Value
-fn evaluate(expression: &str, context: &Context) -> Result<Value> {
+async fn evaluate<'ctx>(expression: &str, context: &Context<'ctx>) -> Result<Value> {
     let parsed = interpreter::parse_all(expression)?;
-    interpreter::evaluate(&parsed, context).map(|v| v.into())
+    interpreter::evaluate(&parsed, context)
+        .await
+        .map(|v| v.into())
 }
 
 /// The given object may be an operator: it has the given key that starts with `$`.  If so,
 /// this function evaluates the operator and return Ok(Some(result)) or an error in
 /// evaluation.  Otherwise, it returns Ok(None) indicating that this is a "normal" object.
-fn maybe_operator(
+async fn maybe_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Option<Value>> {
     match operator {
-        "$eval" => Ok(Some(eval_operator(operator, value, object, context)?)),
-        "$flatten" => Ok(Some(flatten_operator(operator, value, object, context)?)),
-        "$flattenDeep" => Ok(Some(flatten_deep_operator(
-            operator, value, object, context,
-        )?)),
-        "$fromNow" => Ok(Some(from_now_operator(operator, value, object, context)?)),
-        "$if" => Ok(Some(if_operator(operator, value, object, context)?)),
-        "$json" => Ok(Some(json_operator(operator, value, object, context)?)),
-        "$let" => Ok(Some(let_operator(operator, value, object, context)?)),
-        "$map" => Ok(Some(map_operator(operator, value, object, context)?)),
-        "$reduce" => Ok(Some(reduce_operator(operator, value, object, context)?)),
-        "$find" => Ok(Some(find_operator(operator, value, object, context)?)),
-        "$match" => Ok(Some(match_operator(operator, value, object, context)?)),
-        "$switch" => Ok(Some(switch_operator(operator, value, object, context)?)),
-        "$merge" => Ok(Some(merge_operator(operator, value, object, context)?)),
-        "$mergeDeep" => Ok(Some(merge_deep_operator(operator, value, object, context)?)),
-        "$reverse" => Ok(Some(reverse_operator(operator, value, object, context)?)),
-        "$sort" => Ok(Some(sort_operator(operator, value, object, context)?)),
+        "$eval" => Ok(Some(eval_operator(operator, value, object, context).await?)),
+        "$flatten" => Ok(Some(
+            flatten_operator(operator, value, object, context).await?,
+        )),
+        "$flattenDeep" => Ok(Some(
+            flatten_deep_operator(operator, value, object, context).await?,
+        )),
+        "$fromNow" => Ok(Some(
+            from_now_operator(operator, value, object, context).await?,
+        )),
+        "$if" => Ok(Some(if_operator(operator, value, object, context).await?)),
+        "$json" => Ok(Some(json_operator(operator, value, object, context).await?)),
+        "$let" => Ok(Some(let_operator(operator, value, object, context).await?)),
+        "$map" => Ok(Some(map_operator(operator, value, object, context).await?)),
+        "$reduce" => Ok(Some(
+            reduce_operator(operator, value, object, context).await?,
+        )),
+        "$find" => Ok(Some(find_operator(operator, value, object, context).await?)),
+        "$match" => Ok(Some(
+            match_operator(operator, value, object, context).await?,
+        )),
+        "$switch" => Ok(Some(
+            switch_operator(operator, value, object, context).await?,
+        )),
+        "$merge" => Ok(Some(
+            merge_operator(operator, value, object, context).await?,
+        )),
+        "$mergeDeep" => Ok(Some(
+            merge_deep_operator(operator, value, object, context).await?,
+        )),
+        "$reverse" => Ok(Some(
+            reverse_operator(operator, value, object, context).await?,
+        )),
+        "$sort" => Ok(Some(sort_operator(operator, value, object, context).await?)),
 
         // if the operator isn't recognized, then it should be escaped
         _ => Err(template_error!(
@@ -233,28 +262,28 @@ where
     Ok(())
 }
 
-fn eval_operator(
+async fn eval_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |_| false)?;
     if let Value::String(expr) = value {
-        Ok(evaluate(expr, context)?)
+        Ok(evaluate(expr, context).await?)
     } else {
         Err(template_error!("$eval must be given a string expression"))
     }
 }
 
-fn flatten_operator(
+async fn flatten_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |_| false)?;
-    if let Value::Array(ref mut items) = _render(value, context)? {
+    if let Value::Array(ref mut items) = _render(value, context).await? {
         let mut resitems = Vec::new();
         for mut item in items.drain(..) {
             if let Value::Array(ref mut subitems) = item {
@@ -271,11 +300,11 @@ fn flatten_operator(
     }
 }
 
-fn flatten_deep_operator(
+async fn flatten_deep_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |_| false)?;
 
@@ -289,7 +318,7 @@ fn flatten_deep_operator(
         }
     }
 
-    if let value @ Value::Array(_) = _render(value, context)? {
+    if let value @ Value::Array(_) = _render(value, context).await? {
         let mut resitems = Vec::new();
         flatten_deep(value, &mut resitems);
         Ok(Value::Array(resitems))
@@ -298,18 +327,18 @@ fn flatten_deep_operator(
     }
 }
 
-fn from_now_operator(
+async fn from_now_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |prop| prop == "from")?;
     let reference: Cow<str>;
 
     // if "from" is specified, use that as the reference time
     if let Some(val) = object.get("from") {
-        match _render(val, context)? {
+        match _render(val, context).await? {
             Value::String(ref s) => {
                 reference = Cow::Owned(s.to_string());
             }
@@ -326,43 +355,48 @@ fn from_now_operator(
         };
     }
 
-    match _render(value, context)? {
+    match _render(value, context).await? {
         Value::String(s) => Ok(Value::String(from_now(&s, reference.as_ref())?)),
         _ => Err(template_error!("$fromNow expects a string")),
     }
 }
 
-fn if_operator(operator: &str, value: &Value, object: &Object, context: &Context) -> Result<Value> {
+async fn if_operator<'ctx>(
+    operator: &str,
+    value: &Value,
+    object: &Object,
+    context: &Context<'ctx>,
+) -> Result<Value> {
     check_operator_properties(operator, object, |prop| prop == "then" || prop == "else")?;
 
     let eval_result = match value {
-        Value::String(s) => evaluate(&s, context)?,
+        Value::String(s) => evaluate(&s, context).await?,
         _ => return Err(template_error!("$if can evaluate string expressions only")),
     };
 
     let prop = if eval_result.into() { "then" } else { "else" };
     match object.get(prop) {
         None => Ok(Value::DeletionMarker),
-        Some(val) => Ok(_render(val, context)?),
+        Some(val) => Ok(_render(val, context).await?),
     }
 }
 
-fn json_operator(
+async fn json_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |_| false)?;
-    let v = _render(value, context)?;
+    let v = _render(value, context).await?;
     Ok(Value::String(v.to_json()?))
 }
 
-fn let_operator(
+async fn let_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |p| p == "in")?;
 
@@ -370,7 +404,7 @@ fn let_operator(
         return Err(template_error!("$let value must be an object"));
     }
 
-    let value = _render(value, context)?;
+    let value = _render(value, context).await?;
 
     if let Value::Object(o) = value {
         let mut child_context = context.child();
@@ -384,7 +418,7 @@ fn let_operator(
         }
 
         if let Some(in_tpl) = object.get("in") {
-            Ok(_render(in_tpl, &child_context)?)
+            Ok(_render(in_tpl, &child_context).await?)
         } else {
             Err(template_error!("$let operator requires an `in` clause"))
         }
@@ -393,11 +427,11 @@ fn let_operator(
     }
 }
 
-fn map_operator(
+async fn map_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |p| parse_each(p).is_some())?;
     if object.len() != 2 {
@@ -412,7 +446,7 @@ fn map_operator(
 
     let each_tpl = object.get(each_prop).unwrap();
 
-    let mut value = _render(value, context)?;
+    let mut value = _render(value, context).await?;
 
     match value {
         Value::Object(ref o) => {
@@ -433,7 +467,7 @@ fn map_operator(
                     subcontext.insert(value_var, Value::Object(arg));
                 }
 
-                let rendered = _render(each_tpl, &subcontext)?;
+                let rendered = _render(each_tpl, &subcontext).await?;
 
                 if let Value::Object(r) = rendered {
                     for (rk, rv) in r {
@@ -448,22 +482,22 @@ fn map_operator(
             Ok(Value::Object(result))
         }
         Value::Array(ref mut a) => {
-            let mapped = a
-                .drain(..)
-                .enumerate()
-                .map(|(i, v)| {
-                    let mut subcontext = context.child();
-                    subcontext.insert(value_var, v);
-                    if let Some(index_var) = index_var {
-                        subcontext.insert(index_var, Value::Number(i as f64));
-                    }
-                    _render(each_tpl, &subcontext)
-                })
+            let mut mapped = vec![];
+            for (i, v) in a.drain(..).enumerate() {
+                let mut subcontext = context.child();
+                subcontext.insert(value_var, v);
+                if let Some(index_var) = index_var {
+                    subcontext.insert(index_var, Value::Number(i as f64));
+                }
+                mapped.push(_render(each_tpl, &subcontext).await?);
+            }
+            let mapped = mapped
+                .into_iter()
                 .filter(|v| match v {
-                    Ok(Value::DeletionMarker) => false,
+                    Value::DeletionMarker => false,
                     _ => true,
                 })
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<Vec<_>>();
             Ok(Value::Array(mapped))
         }
         _ => Err(template_error!(
@@ -472,11 +506,11 @@ fn map_operator(
     }
 }
 
-fn reduce_operator(
+async fn reduce_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |p| {
         p == "initial" || parse_each_three(p).is_some()
@@ -500,40 +534,37 @@ fn reduce_operator(
 
     let each_tpl = object.get(each_prop).unwrap();
 
-    let mut value = _render(value, context)?;
+    let mut value = _render(value, context).await?;
     // Need to get the initial value from the object.
     let initial = object.get("initial").unwrap();
 
     match value {
         Value::Array(ref mut a) => {
-            let mapped = a
-                .drain(..)
-                .enumerate()
-                .try_fold(initial.clone(), |acc, (i, v)| {
-                    let mut subcontext = context.child();
-                    subcontext.insert(acc_var, acc.clone());
-                    subcontext.insert(value_var, v);
-                    if let Some(index_var) = index_var {
-                        subcontext.insert(index_var, Value::Number(i as f64));
-                    }
-                    let rendered = _render(each_tpl, &subcontext);
-                    match rendered {
-                        Ok(Value::DeletionMarker) => Ok(acc),
-                        Ok(v) => Ok(v),
-                        Err(e) => Err(e),
-                    }
-                });
-            mapped
+            let mut acc = initial.clone();
+            for (i, v) in a.drain(..).enumerate() {
+                let mut subcontext = context.child();
+                subcontext.insert(acc_var, acc.clone());
+                subcontext.insert(value_var, v);
+                if let Some(index_var) = index_var {
+                    subcontext.insert(index_var, Value::Number(i as f64));
+                }
+                let rendered = _render(each_tpl, &subcontext).await?;
+                acc = match rendered {
+                    Value::DeletionMarker => acc,
+                    v => v,
+                }
+            }
+            Ok(acc)
         }
         _ => Err(template_error!("$reduce value must evaluate to an array")),
     }
 }
 
-fn find_operator(
+async fn find_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |p| parse_each(p).is_some())?;
     if object.len() != 2 {
@@ -548,7 +579,7 @@ fn find_operator(
 
     let each_tpl = object.get(each_prop).unwrap();
 
-    let mut value = _render(value, context)?;
+    let mut value = _render(value, context).await?;
 
     if let Value::Array(ref mut a) = value {
         for (i, v) in a.iter().enumerate() {
@@ -559,9 +590,9 @@ fn find_operator(
             }
 
             if let Value::String(ref s) = each_tpl {
-                let eval_result = evaluate(&s, &subcontext)?;
+                let eval_result = evaluate(&s, &subcontext).await?;
                 if bool::from(eval_result) {
-                    return Ok(_render(&v, &subcontext)?);
+                    return Ok(_render(&v, &subcontext).await?);
                 }
             } else {
                 return Err(template_error!(
@@ -575,21 +606,21 @@ fn find_operator(
     }
 }
 
-fn match_operator(
+async fn match_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |_| false)?;
     if let Value::Object(ref obj) = value {
         let mut res = vec![];
         for (cond, val) in obj {
-            if let Ok(cond) = evaluate(&cond, context) {
+            if let Ok(cond) = evaluate(&cond, context).await {
                 if !bool::from(cond) {
                     continue;
                 }
-                res.push(_render(val, context)?);
+                res.push(_render(val, context).await?);
             } else {
                 bail!(template_error!("parsing error in condition"));
             }
@@ -600,11 +631,11 @@ fn match_operator(
     }
 }
 
-fn switch_operator(
+async fn switch_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     if let Value::Object(ref obj) = value {
         let mut res = None;
@@ -616,7 +647,7 @@ fn switch_operator(
                 continue;
             }
             // try to evaluate the condition
-            if let Ok(cond) = evaluate(&cond, context) {
+            if let Ok(cond) = evaluate(&cond, context).await {
                 if !bool::from(cond) {
                     continue;
                 }
@@ -632,9 +663,9 @@ fn switch_operator(
         }
 
         if let Some(res) = res {
-            _render(res, context)
+            _render(res, context).await
         } else if let Some(unrendered_default) = unrendered_default {
-            _render(unrendered_default, context)
+            _render(unrendered_default, context).await
         } else {
             Ok(Value::DeletionMarker)
         }
@@ -643,14 +674,14 @@ fn switch_operator(
     }
 }
 
-fn merge_operator(
+async fn merge_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |_| false)?;
-    if let Value::Array(items) = _render(value, context)? {
+    if let Value::Array(items) = _render(value, context).await? {
         let mut new_obj = std::collections::BTreeMap::new();
         for item in items {
             if let Value::Object(mut obj) = item {
@@ -669,11 +700,11 @@ fn merge_operator(
     }
 }
 
-fn merge_deep_operator(
+async fn merge_deep_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     fn merge_deep(a: &Value, b: &Value) -> Value {
         match (a, b) {
@@ -699,7 +730,7 @@ fn merge_deep_operator(
     }
 
     check_operator_properties(operator, object, |_| false)?;
-    if let Value::Array(items) = _render(value, context)? {
+    if let Value::Array(items) = _render(value, context).await? {
         let mut new_obj = Value::Object(std::collections::BTreeMap::new());
         for item in items {
             if let Value::Object(_) = item {
@@ -718,25 +749,25 @@ fn merge_deep_operator(
     }
 }
 
-fn reverse_operator(
+async fn reverse_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |_| false)?;
-    if let Value::Array(items) = _render(value, context)? {
+    if let Value::Array(items) = _render(value, context).await? {
         Ok(Value::Array(items.into_iter().rev().collect()))
     } else {
         Err(template_error!("$reverse value must evaluate to an array"))
     }
 }
 
-fn sort_operator(
+async fn sort_operator<'ctx>(
     operator: &str,
     value: &Value,
     object: &Object,
-    context: &Context,
+    context: &Context<'ctx>,
 ) -> Result<Value> {
     check_operator_properties(operator, object, |p| parse_by(p).is_some())?;
 
@@ -746,7 +777,7 @@ fn sort_operator(
         ))
     };
 
-    if let Value::Array(arr) = _render(value, context)? {
+    if let Value::Array(arr) = _render(value, context).await? {
         // short-circuit a zero-length array, so we can later assume at least one item
         if arr.len() == 0 {
             return Ok(Value::Array(arr));
@@ -779,13 +810,11 @@ fn sort_operator(
         // on the first and only take the second when building the final result.
         // This could be optimized by exiting early if there is an invalid combination of
         // types.
-        let mut eval_pairs: Vec<(Value, Value)> = arr
-            .iter()
-            .map(|item| {
-                subcontext.insert(by_var, item.clone());
-                Ok((evaluate(by_expr, &subcontext)?, item.clone()))
-            })
-            .collect::<Result<_>>()?;
+        let mut eval_pairs: Vec<(Value, Value)> = vec![];
+        for item in arr.iter() {
+            subcontext.insert(by_var, item.clone());
+            eval_pairs.push((evaluate(by_expr, &subcontext).await?, item.clone()));
+        }
 
         if eval_pairs.iter().all(|(e, _v)| e.is_string()) {
             // sort strings
@@ -887,78 +916,78 @@ mod tests {
     use crate::render;
     use serde_json::json;
 
-    #[test]
-    fn render_returns_correct_template() {
+    #[tokio::test]
+    async fn render_returns_correct_template() {
         let template = json!({"code": 200});
         let context = json!({});
-        assert_eq!(template, render(&template, &context).unwrap())
+        assert_eq!(template, render(&template, &context).await.unwrap())
     }
 
-    #[test]
-    fn render_gets_number() {
+    #[tokio::test]
+    async fn render_gets_number() {
         let template = json!(200);
         let context = json!({});
-        assert_eq!(template, render(&template, &context).unwrap())
+        assert_eq!(template, render(&template, &context).await.unwrap())
     }
 
-    #[test]
-    fn render_gets_boolean() {
+    #[tokio::test]
+    async fn render_gets_boolean() {
         let template = json!(true);
         let context = json!({});
-        assert_eq!(template, render(&template, &context).unwrap())
+        assert_eq!(template, render(&template, &context).await.unwrap())
     }
 
-    #[test]
-    fn render_gets_null() {
+    #[tokio::test]
+    async fn render_gets_null() {
         let template = json!(null);
         let context = json!({});
-        assert_eq!(template, render(&template, &context).unwrap())
+        assert_eq!(template, render(&template, &context).await.unwrap())
     }
 
-    #[test]
-    fn render_gets_string() {
+    #[tokio::test]
+    async fn render_gets_string() {
         let template = "tiny string".into();
         let context = json!({});
-        assert_eq!(template, render(&template, &context).unwrap())
+        assert_eq!(template, render(&template, &context).await.unwrap())
     }
 
-    #[test]
-    fn render_gets_array() {
+    #[tokio::test]
+    async fn render_gets_array() {
         let template = json!([1, 2, 3]);
         let context = json!({});
-        assert_eq!(template, render(&template, &context).unwrap())
+        assert_eq!(template, render(&template, &context).await.unwrap())
     }
 
-    #[test]
-    fn render_gets_object() {
+    #[tokio::test]
+    async fn render_gets_object() {
         let template = json!({"a":1, "b":2});
         let context = json!({});
-        assert_eq!(template, render(&template, &context).unwrap())
+        assert_eq!(template, render(&template, &context).await.unwrap())
     }
 
-    #[test]
-    fn invalid_context() {
+    #[tokio::test]
+    async fn invalid_context() {
         let template = json!({});
-        assert!(render(&template, &json!(null)).is_err());
-        assert!(render(&template, &json!(false)).is_err());
-        assert!(render(&template, &json!(3.2)).is_err());
-        assert!(render(&template, &json!("two")).is_err());
-        assert!(render(&template, &json!([{}])).is_err());
+        assert!(render(&template, &json!(null)).await.is_err());
+        assert!(render(&template, &json!(false)).await.is_err());
+        assert!(render(&template, &json!(3.2)).await.is_err());
+        assert!(render(&template, &json!("two")).await.is_err());
+        assert!(render(&template, &json!([{}])).await.is_err());
     }
 
-    #[test]
-    fn render_array_drops_deletion_markers() {
+    #[tokio::test]
+    async fn render_array_drops_deletion_markers() {
         let template = json!([1, {"$if": "false", "then": 1}, 3]);
         let context = json!({});
-        assert_eq!(render(&template, &context).unwrap(), json!([1, 3]))
+        assert_eq!(render(&template, &context).await.unwrap(), json!([1, 3]))
     }
 
-    #[test]
-    fn render_obj_drops_deletion_markers() {
+    #[tokio::test]
+    async fn render_obj_drops_deletion_markers() {
         let template = json!({"v": {"$if": "false", "then": 1}, "k": "sleutel"});
         let context = json!({});
         assert_eq!(
-            render(&template, &context).unwrap(),
+            render(&template, &context).await.unwrap(),
             json!({"k": "sleutel"})
         )
     }
@@ -1014,52 +1043,55 @@ mod tests {
         use super::super::interpolate;
 
         use crate::interpreter::Context;
-        #[test]
-        fn plain_string() {
+        #[tokio::test]
+        async fn plain_string() {
             let context = Context::new();
             assert_eq!(
-                interpolate("a string", &context).unwrap(),
+                interpolate("a string", &context).await.unwrap(),
                 String::from("a string")
             );
         }
 
-        #[test]
-        fn interpolation_in_middle() {
+        #[tokio::test]
+        async fn interpolation_in_middle() {
             let context = Context::new();
             assert_eq!(
-                interpolate("a${13}b", &context).unwrap(),
+                interpolate("a${13}b", &context).await.unwrap(),
                 String::from("a13b")
             );
         }
 
-        #[test]
-        fn escaped_interpolation() {
+        #[tokio::test]
+        async fn escaped_interpolation() {
             let context = Context::new();
             assert_eq!(
-                interpolate("a$${13}b", &context).unwrap(),
+                interpolate("a$${13}b", &context).await.unwrap(),
                 String::from("a${13}b")
             );
         }
 
-        #[test]
-        fn double_escaped_interpolation() {
+        #[tokio::test]
+        async fn double_escaped_interpolation() {
             let context = Context::new();
             assert_eq!(
-                interpolate("a$$${13}b", &context).unwrap(),
+                interpolate("a$$${13}b", &context).await.unwrap(),
                 String::from("a$${13}b")
             );
         }
 
-        #[test]
-        fn multibyte_unicode_interpolation_escape() {
+        #[tokio::test]
+        async fn multibyte_unicode_interpolation_escape() {
             let context = Context::new();
-            assert_eq!(interpolate("a$☃", &context).unwrap(), String::from("a$☃"));
+            assert_eq!(
+                interpolate("a$☃", &context).await.unwrap(),
+                String::from("a$☃")
+            );
         }
 
-        #[test]
-        fn unterminated_interpolation() {
+        #[tokio::test]
+        async fn unterminated_interpolation() {
             let context = Context::new();
-            assert!(interpolate("a${13+14", &context).is_err());
+            assert!(interpolate("a${13+14", &context).await.is_err());
         }
     }
 

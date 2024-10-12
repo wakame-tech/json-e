@@ -1,11 +1,30 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
+use std::future::IntoFuture;
+
 use super::context::Context;
 use super::node::Node;
 use crate::value::{Object, Value};
 use anyhow::Result;
+use async_recursion::async_recursion;
+use futures::future::try_join_all;
 
-pub(crate) fn evaluate(node: &Node, context: &Context) -> Result<Value> {
+async fn map_async<'n, R: IntoFuture, F>(
+    x: Option<&'n Node<'n>>,
+    f: F,
+) -> Option<<R as IntoFuture>::Output>
+where
+    F: Fn(&'n Node) -> R,
+{
+    if let Some(x) = x {
+        Some(f(x).await)
+    } else {
+        None
+    }
+}
+
+#[async_recursion]
+pub(crate) async fn evaluate<'ctx, 'n>(node: &Node<'n>, context: &Context<'ctx>) -> Result<Value> {
     match *node {
         Node::Number(n) => Ok(Value::Number(n.parse()?)),
         Node::String(s) => Ok(Value::String(s.to_owned())),
@@ -17,25 +36,24 @@ pub(crate) fn evaluate(node: &Node, context: &Context) -> Result<Value> {
         Node::False => Ok(Value::Bool(false)),
         Node::Null => Ok(Value::Null),
         Node::Array(ref items) => Ok(Value::Array(
-            items
-                .iter()
-                .map(|i| evaluate(i, context))
-                .collect::<Result<Vec<Value>>>()?,
+            try_join_all(items.iter().map(|i| evaluate(i, context))).await?,
         )),
         Node::Object(ref items) => {
             let mut map = Object::new();
             for (k, v) in items.iter() {
-                let v = evaluate(v, context)?;
+                let v = evaluate(v, context).await?;
                 map.insert((*k).to_owned(), v);
             }
             Ok(Value::Object(map))
         }
-        Node::Un(ref op, ref v) => un(context, op, v.as_ref()),
-        Node::Op(ref l, ref o, ref r) => op(context, l.as_ref(), o, r.as_ref()),
-        Node::Index(ref v, ref i) => index(context, v.as_ref(), i.as_ref()),
-        Node::Slice(ref v, ref a, ref b) => slice(context, v.as_ref(), a.as_deref(), b.as_deref()),
-        Node::Dot(ref v, ref p) => dot(context, v.as_ref(), p),
-        Node::Func(ref f, ref args) => func(context, f.as_ref(), &args[..]),
+        Node::Un(ref op, ref v) => un(context, op, v.as_ref()).await,
+        Node::Op(ref l, ref o, ref r) => op(context, l.as_ref(), o, r.as_ref()).await,
+        Node::Index(ref v, ref i) => index(context, v.as_ref(), i.as_ref()).await,
+        Node::Slice(ref v, ref a, ref b) => {
+            slice(context, v.as_ref(), a.as_deref(), b.as_deref()).await
+        }
+        Node::Dot(ref v, ref p) => dot(context, v.as_ref(), p).await,
+        Node::Func(ref f, ref args) => func(context, f.as_ref(), &args[..]).await,
     }
 }
 
@@ -55,8 +73,8 @@ fn number_to_i64(v: &Value) -> Option<i64> {
     }
 }
 
-fn un(context: &Context, op: &str, v: &Node) -> Result<Value> {
-    let v = evaluate(v, context)?;
+async fn un<'ctx, 'n>(context: &Context<'ctx>, op: &str, v: &Node<'n>) -> Result<Value> {
+    let v = evaluate(v, context).await?;
     match (op, v) {
         ("-", Value::Number(ref n)) => Ok(Value::Number(-*n)),
         ("-", _) => Err(interpreter_error!("This operator expects a number")),
@@ -70,8 +88,13 @@ fn un(context: &Context, op: &str, v: &Node) -> Result<Value> {
     }
 }
 
-fn op(context: &Context, l: &Node, o: &str, r: &Node) -> Result<Value> {
-    let l = evaluate(l, context)?;
+async fn op<'ctx, 'n>(
+    context: &Context<'ctx>,
+    l: &Node<'n>,
+    o: &str,
+    r: &Node<'n>,
+) -> Result<Value> {
+    let l = evaluate(l, context).await?;
 
     // perform the short-circuiting operations first
     if o == "||" && bool::from(&l) {
@@ -81,7 +104,7 @@ fn op(context: &Context, l: &Node, o: &str, r: &Node) -> Result<Value> {
     }
 
     // now we can unconditionally evaluate the right operand
-    let r = evaluate(r, context)?;
+    let r = evaluate(r, context).await?;
 
     match (l, o, r) {
         (Value::Number(ref l), "**", Value::Number(ref r)) => Ok(Value::Number(l.powf(*r))),
@@ -144,8 +167,8 @@ fn op(context: &Context, l: &Node, o: &str, r: &Node) -> Result<Value> {
     }
 }
 
-fn index(context: &Context, v: &Node, i: &Node) -> Result<Value> {
-    match (evaluate(v, context)?, evaluate(i, context)?) {
+async fn index<'ctx, 'n>(context: &Context<'ctx>, v: &Node<'n>, i: &Node<'n>) -> Result<Value> {
+    match (evaluate(v, context).await?, evaluate(i, context).await?) {
         (Value::Array(ref a), ref n) => {
             let mut i = number_to_i64(n).ok_or(interpreter_error!(
                 "should only use integers to access arrays or strings"
@@ -193,8 +216,13 @@ fn index(context: &Context, v: &Node, i: &Node) -> Result<Value> {
     }
 }
 
-fn slice(context: &Context, v: &Node, a: Option<&Node>, b: Option<&Node>) -> Result<Value> {
-    let mut v = evaluate(v, context)?;
+async fn slice<'ctx, 'n>(
+    context: &Context<'ctx>,
+    v: &Node<'n>,
+    a: Option<&Node<'n>>,
+    b: Option<&Node<'n>>,
+) -> Result<Value> {
+    let mut v = evaluate(v, context).await?;
     let len = match v {
         Value::String(ref s) => s.chars().count(),
         Value::Array(ref v) => v.len(),
@@ -215,15 +243,15 @@ fn slice(context: &Context, v: &Node, a: Option<&Node>, b: Option<&Node>) -> Res
         x as usize
     }
 
-    let a = a
-        .map(|x| evaluate(x, context))
+    let a = map_async(a, |x| evaluate(x, context))
+        .await
         .transpose()?
         .map(|x| number_to_i64(&x).ok_or(interpreter_error!("slice indices must be integers")))
         .transpose()?
         .map(|x| wrap(x, len))
         .unwrap_or(0);
-    let b = b
-        .map(|x| evaluate(x, context))
+    let b = map_async(b, |x| evaluate(x, context))
+        .await
         .transpose()?
         .map(|x| number_to_i64(&x).ok_or(interpreter_error!("slice indices must be integers")))
         .transpose()?
@@ -237,7 +265,7 @@ fn slice(context: &Context, v: &Node, a: Option<&Node>, b: Option<&Node>) -> Res
                 let indices = s.char_indices().map(|(i, c)| i);
                 let mut indices = indices.skip(a);
                 let a_idx = indices.next().unwrap_or_else(|| s.len());
-                let mut indices = indices.skip(b-a-1);
+                let mut indices = indices.skip(b - a - 1);
                 let b_idx = indices.next().unwrap_or_else(|| s.len());
                 Value::String(
                     s.get(a_idx..b_idx)
@@ -262,8 +290,8 @@ fn slice(context: &Context, v: &Node, a: Option<&Node>, b: Option<&Node>) -> Res
     r
 }
 
-fn dot(context: &Context, v: &Node, p: &str) -> Result<Value> {
-    match evaluate(v, context)? {
+async fn dot<'ctx, 'n>(context: &Context<'ctx>, v: &Node<'n>, p: &str) -> Result<Value> {
+    match evaluate(v, context).await? {
         Value::Object(ref o) => {
             if let Some(v) = o.get(p) {
                 Ok(v.clone())
@@ -275,14 +303,11 @@ fn dot(context: &Context, v: &Node, p: &str) -> Result<Value> {
     }
 }
 
-fn func(context: &Context, f: &Node, args: &[Node]) -> Result<Value> {
-    let f = evaluate(f, context)?;
-    let args = args
-        .iter()
-        .map(|x| evaluate(x, context))
-        .collect::<Result<Vec<_>>>()?;
+async fn func<'ctx, 'n>(context: &Context<'ctx>, f: &Node<'n>, args: &[Node<'n>]) -> Result<Value> {
+    let f = evaluate(f, context).await?;
+    let args = try_join_all(args.iter().map(|x| evaluate(x, context))).await?;
     match f {
-        Value::Function(ref f) => Ok(f.call(&context, &args)?),
+        Value::Function(ref f) => Ok(f.call(&context, &args).await?),
         _ => Err(interpreter_error!(
             "function invocation requires a function"
         )),
@@ -293,66 +318,80 @@ fn func(context: &Context, f: &Node, args: &[Node]) -> Result<Value> {
 mod test {
     use super::*;
 
-    #[test]
-    fn test_literals() {
-        assert_eq!(evaluate(&Node::Null, &Context::new()).unwrap(), Value::Null);
+    #[tokio::test]
+    async fn test_literals() {
         assert_eq!(
-            evaluate(&Node::True, &Context::new()).unwrap(),
+            evaluate(&Node::Null, &Context::new()).await.unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            evaluate(&Node::True, &Context::new()).await.unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            evaluate(&Node::False, &Context::new()).unwrap(),
+            evaluate(&Node::False, &Context::new()).await.unwrap(),
             Value::Bool(false)
         );
     }
 
-    #[test]
-    fn test_number() {
+    #[tokio::test]
+    async fn test_number() {
         assert_eq!(
-            evaluate(&Node::Number("13"), &Context::new()).unwrap(),
+            evaluate(&Node::Number("13"), &Context::new())
+                .await
+                .unwrap(),
             Value::Number(13.0),
         );
         assert_eq!(
-            evaluate(&Node::Number("13.5"), &Context::new()).unwrap(),
+            evaluate(&Node::Number("13.5"), &Context::new())
+                .await
+                .unwrap(),
             Value::Number(13.5),
         );
     }
 
-    #[test]
-    fn test_string() {
+    #[tokio::test]
+    async fn test_string() {
         assert_eq!(
-            evaluate(&Node::String("abc"), &Context::new()).unwrap(),
+            evaluate(&Node::String("abc"), &Context::new())
+                .await
+                .unwrap(),
             Value::String("abc".into()),
         );
     }
 
-    #[test]
-    fn test_ident() {
+    #[tokio::test]
+    async fn test_ident() {
         let mut c = Context::new();
         c.insert("a", Value::Number(29.0));
         assert_eq!(
-            evaluate(&Node::Ident("a"), &c).unwrap(),
+            evaluate(&Node::Ident("a"), &c).await.unwrap(),
             Value::Number(29.0)
         );
     }
 
-    #[test]
-    fn test_ident_nosuch() {
+    #[tokio::test]
+    async fn test_ident_nosuch() {
         let c = Context::new();
-        assert_interpreter_error!(evaluate(&Node::Ident("a"), &c), "unknown context value a");
+        assert_interpreter_error!(
+            evaluate(&Node::Ident("a"), &c).await,
+            "unknown context value a"
+        );
     }
 
-    #[test]
-    fn test_unary_minus_i64() {
+    #[tokio::test]
+    async fn test_unary_minus_i64() {
         let c = Context::new();
         assert_eq!(
-            evaluate(&Node::Un("-", Box::new(Node::Number("-10"))), &c).unwrap(),
+            evaluate(&Node::Un("-", Box::new(Node::Number("-10"))), &c)
+                .await
+                .unwrap(),
             Value::Number(10.0),
         );
     }
 
-    #[test]
-    fn test_unary_minus_u64() {
+    #[tokio::test]
+    async fn test_unary_minus_u64() {
         let c = Context::new();
         assert_eq!(
             evaluate(
@@ -360,13 +399,14 @@ mod test {
                 &Node::Un("-", Box::new(Node::Number("9223372036854775809"))),
                 &c
             )
+            .await
             .unwrap(),
             Value::Number("-9223372036854775809".parse().unwrap()),
         );
     }
 
-    #[test]
-    fn test_unary_minus_f64() {
+    #[tokio::test]
+    async fn test_unary_minus_f64() {
         let c = Context::new();
         assert_eq!(
             evaluate(
@@ -374,47 +414,53 @@ mod test {
                 &Node::Un("-", Box::new(Node::Number("29.25"))),
                 &c
             )
+            .await
             .unwrap(),
             Value::Number(-29.25),
         );
     }
 
-    #[test]
-    fn test_unary_minus_not_number() {
+    #[tokio::test]
+    async fn test_unary_minus_not_number() {
         let c = Context::new();
         assert_interpreter_error!(
             evaluate(
                 // this number is larger that i64::MAX
                 &Node::Un("-", Box::new(Node::String("abc"))),
                 &c
-            ),
+            )
+            .await,
             "This operator expects a number"
         );
     }
 
-    #[test]
-    fn test_unary_plus() {
+    #[tokio::test]
+    async fn test_unary_plus() {
         let c = Context::new();
         assert_eq!(
-            evaluate(&Node::Un("+", Box::new(Node::Number("29.25"))), &c).unwrap(),
+            evaluate(&Node::Un("+", Box::new(Node::Number("29.25"))), &c)
+                .await
+                .unwrap(),
             Value::Number(29.25),
         );
     }
 
-    #[test]
-    fn test_unary_plus_not_number() {
+    #[tokio::test]
+    async fn test_unary_plus_not_number() {
         let c = Context::new();
         assert_interpreter_error!(
-            evaluate(&Node::Un("-", Box::new(Node::String("abc"))), &c),
+            evaluate(&Node::Un("-", Box::new(Node::String("abc"))), &c).await,
             "This operator expects a number"
         );
     }
 
-    #[test]
-    fn test_unary_bang() {
+    #[tokio::test]
+    async fn test_unary_bang() {
         let c = Context::new();
         assert_eq!(
-            evaluate(&Node::Un("!", Box::new(Node::False)), &c).unwrap(),
+            evaluate(&Node::Un("!", Box::new(Node::False)), &c)
+                .await
+                .unwrap(),
             Value::Bool(true),
         );
     }

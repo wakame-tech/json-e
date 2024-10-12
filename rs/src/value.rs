@@ -34,7 +34,7 @@ impl Function {
         Function { name, f }
     }
 
-    pub(crate) fn call(&self, context: &Context, args: &[Value]) -> Result<Value> {
+    pub(crate) async fn call<'a>(&self, context: &Context<'a>, args: &[Value]) -> Result<Value> {
         (self.f)(context, args)
     }
 }
