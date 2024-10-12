@@ -20,8 +20,12 @@ use std::fmt::Write;
 
 /// Render the given JSON-e template with the given context.
 pub fn render(template: &SerdeValue, context: &SerdeValue) -> Result<SerdeValue> {
-    let template: Value = template.into();
     let context = Context::from_serde_value(context, Some(&BUILTINS))?;
+    render_with_context(template, &context)
+}
+
+pub fn render_with_context(template: &SerdeValue, context: &Context) -> Result<SerdeValue> {
+    let template: Value = template.into();
 
     // set "now" in context to a single current time for the duration of the render
     let mut context = context.child();

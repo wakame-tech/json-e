@@ -12,7 +12,7 @@ pub(crate) type Object = BTreeMap<String, Value>;
 
 /// A custom function (built-in or user-provided)
 #[derive(Clone)]
-pub(crate) struct Function {
+pub struct Function {
     name: &'static str,
     f: fn(&Context, &[Value]) -> Result<Value>,
 }
@@ -30,7 +30,7 @@ impl PartialEq for Function {
 }
 
 impl Function {
-    pub(crate) fn new(name: &'static str, f: fn(&Context, &[Value]) -> Result<Value>) -> Function {
+    pub fn new(name: &'static str, f: fn(&Context, &[Value]) -> Result<Value>) -> Function {
         Function { name, f }
     }
 
@@ -44,7 +44,7 @@ impl Function {
 ///  - can represent a deletion marker
 ///  - a Number variant suitable for arithmetic
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) enum Value {
+pub enum Value {
     // Normal JSON types
     Null,
     String(String),

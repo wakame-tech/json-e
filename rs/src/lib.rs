@@ -2,11 +2,12 @@
 mod errors;
 mod builtins;
 mod fromnow;
-mod interpreter;
+pub mod interpreter;
 mod op_props;
 mod render;
-mod value;
+pub mod value;
 mod whitespace;
 
 pub use fromnow::use_test_now;
-pub use render::render;
+pub use interpreter::context::Context;
+pub use render::{render, render_with_context};

@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use serde_json::Value as SerdeValue;
 use std::collections::HashMap;
 
-pub(crate) struct Context<'a> {
+pub struct Context<'a> {
     content: HashMap<String, Value>,
     parent: Option<&'a Context<'a>>,
 }
@@ -15,7 +15,7 @@ pub(crate) struct Context<'a> {
 /// Context for expression evaluation.
 impl<'a> Context<'a> {
     /// Create a new, empty context.
-    pub(crate) fn new() -> Context<'a> {
+    pub fn new() -> Context<'a> {
         Context {
             content: HashMap::new(),
             parent: None,
