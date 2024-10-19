@@ -1,6 +1,6 @@
 #[macro_use]
 mod errors;
-mod builtins;
+pub mod builtins;
 mod fromnow;
 pub mod interpreter;
 mod op_props;
