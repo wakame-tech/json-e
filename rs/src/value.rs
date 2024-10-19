@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+use crate::interpreter::Context;
 use anyhow::{Error, Result};
 use futures::future::BoxFuture;
 use futures::TryFutureExt;
@@ -7,8 +8,6 @@ use std::collections::BTreeMap;
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
 
-use crate::interpreter::Context;
-
 /// shorthand for object values
 pub(crate) type Object = BTreeMap<String, Value>;
 
@@ -16,7 +15,7 @@ pub(crate) type Object = BTreeMap<String, Value>;
 #[derive(Clone)]
 pub struct Function {
     name: &'static str,
-    f: for<'n> fn(&Context, &'n [Value]) -> BoxFuture<'n, Result<Value>>,
+    f: for<'a> fn(&Context<'_>, &'a [Value]) -> BoxFuture<'a, Result<Value>>,
 }
 
 impl fmt::Debug for Function {
@@ -34,7 +33,7 @@ impl PartialEq for Function {
 impl Function {
     pub fn new(
         name: &'static str,
-        f: for<'ctx, 'n> fn(&Context, &'n [Value]) -> BoxFuture<'n, Result<Value>>,
+        f: for<'a> fn(&Context<'_>, &'a [Value]) -> BoxFuture<'a, Result<Value>>,
     ) -> Function {
         Function { name, f }
     }
