@@ -303,7 +303,11 @@ async fn dot<'ctx, 'n>(context: &Context<'ctx>, v: &Node<'n>, p: &str) -> Result
     }
 }
 
-async fn func<'ctx, 'n>(context: &Context<'ctx>, f: &Node<'n>, args: &[Node<'n>]) -> Result<Value> {
+async fn func<'ctx, 'n>(
+    context: &'ctx Context<'ctx>,
+    f: &Node<'n>,
+    args: &[Node<'n>],
+) -> Result<Value> {
     let f = evaluate(f, context).await?;
     let args = try_join_all(args.iter().map(|x| evaluate(x, context))).await?;
     match f {

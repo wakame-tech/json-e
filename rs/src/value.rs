@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 use crate::interpreter::Context;
 use anyhow::{Error, Result};
-use futures::future::BoxFuture;
-use futures::TryFutureExt;
+use dyn_clone::{clone_box, DynClone};
 use serde_json::{Map, Number, Value as SerdeValue};
 use std::collections::BTreeMap;
 use std::convert::{TryFrom, TryInto};
@@ -12,10 +11,23 @@ use std::fmt;
 pub(crate) type Object = BTreeMap<String, Value>;
 
 /// A custom function (built-in or user-provided)
-#[derive(Clone)]
 pub struct Function {
     name: &'static str,
-    f: for<'a> fn(&Context<'_>, &'a [Value]) -> BoxFuture<'a, Result<Value>>,
+    f: Box<dyn AsyncCallable>,
+}
+
+impl Clone for Function {
+    fn clone(&self) -> Self {
+        Function {
+            name: self.name,
+            f: clone_box(self.f.as_ref()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+pub trait AsyncCallable: DynClone + Send + Sync {
+    async fn call(&self, context: &Context<'_>, args: &[Value]) -> Result<Value>;
 }
 
 impl fmt::Debug for Function {
@@ -26,21 +38,17 @@ impl fmt::Debug for Function {
 
 impl PartialEq for Function {
     fn eq(&self, other: &Self) -> bool {
-        self.f as *const () == other.f as *const () && self.name == other.name
+        self.name == other.name
     }
 }
 
 impl Function {
-    pub fn new(
-        name: &'static str,
-        f: for<'a> fn(&Context<'_>, &'a [Value]) -> BoxFuture<'a, Result<Value>>,
-    ) -> Function {
+    pub fn new(name: &'static str, f: Box<dyn AsyncCallable>) -> Function {
         Function { name, f }
     }
 
-    pub(crate) async fn call<'a>(&self, context: &Context<'a>, args: &[Value]) -> Result<Value> {
-        let r = (self.f)(context, args).into_future();
-        r.await
+    pub(crate) async fn call(&self, context: &Context<'_>, args: &[Value]) -> Result<Value> {
+        self.f.call(context, args).await
     }
 }
 
@@ -48,7 +56,7 @@ impl Function {
 ///  - can contain functions as first-class objects
 ///  - can represent a deletion marker
 ///  - a Number variant suitable for arithmetic
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     // Normal JSON types
     Null,

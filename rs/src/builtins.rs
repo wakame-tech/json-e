@@ -7,69 +7,69 @@ use futures::FutureExt;
 use lazy_static::lazy_static;
 use std::convert::TryInto;
 
-lazy_static! {
-    pub(crate) static ref BUILTINS: Context<'static> = {
-        let builtins = Context::new();
-        // TODO
-        // builtins.insert("abs", Value::Function(Function::new("abs", abs_builtin)));
-        // builtins.insert("str", Value::Function(Function::new("str", str_builtin)));
-        // builtins.insert("len", Value::Function(Function::new("len", len_builtin)));
-        // builtins.insert("min", Value::Function(Function::new("min", min_builtin)));
-        // builtins.insert("max", Value::Function(Function::new("max", max_builtin)));
-        // builtins.insert("sqrt", Value::Function(Function::new("sqrt", sqrt_builtin)));
-        // builtins.insert("ceil", Value::Function(Function::new("ceil", ceil_builtin)));
-        // builtins.insert(
-        //     "floor",
-        //     Value::Function(Function::new("floor", floor_builtin)),
-        // );
-        // builtins.insert(
-        //     "lowercase",
-        //     Value::Function(Function::new("lowercase", lowercase_builtin)),
-        // );
-        // builtins.insert(
-        //     "uppercase",
-        //     Value::Function(Function::new("uppercase", uppercase_builtin)),
-        // );
-        // builtins.insert(
-        //     "number",
-        //     Value::Function(Function::new("number", number_builtin)),
-        // );
-        // builtins.insert(
-        //     "strip",
-        //     Value::Function(Function::new("strip", strip_builtin)),
-        // );
-        // builtins.insert(
-        //     "range",
-        //     Value::Function(Function::new("range", range_builtin)),
-        // );
-        // builtins.insert(
-        //     "rstrip",
-        //     Value::Function(Function::new("rstrip", rstrip_builtin)),
-        // );
-        // builtins.insert(
-        //     "lstrip",
-        //     Value::Function(Function::new("lstrip", lstrip_builtin)),
-        // );
-        // builtins.insert("join", Value::Function(Function::new("join", join_builtin)));
-        // builtins.insert(
-        //     "split",
-        //     Value::Function(Function::new("split", split_builtin)),
-        // );
-        // builtins.insert(
-        //     "fromNow",
-        //     Value::Function(Function::new("fromNow", from_now_builtin)),
-        // );
-        // builtins.insert(
-        //     "typeof",
-        //     Value::Function(Function::new("typeof", typeof_builtin)),
-        // );
-        // builtins.insert(
-        //     "defined",
-        //     Value::Function(Function::new("defined", defined_builtin)),
-        // );
-        builtins
-    };
-}
+// lazy_static! {
+//     pub(crate) static ref BUILTINS: Context<'static> = {
+//         let builtins = Context::new();
+// TODO
+// builtins.insert("abs", Value::Function(Function::new("abs", abs_builtin)));
+// builtins.insert("str", Value::Function(Function::new("str", str_builtin)));
+// builtins.insert("len", Value::Function(Function::new("len", len_builtin)));
+// builtins.insert("min", Value::Function(Function::new("min", min_builtin)));
+// builtins.insert("max", Value::Function(Function::new("max", max_builtin)));
+// builtins.insert("sqrt", Value::Function(Function::new("sqrt", sqrt_builtin)));
+// builtins.insert("ceil", Value::Function(Function::new("ceil", ceil_builtin)));
+// builtins.insert(
+//     "floor",
+//     Value::Function(Function::new("floor", floor_builtin)),
+// );
+// builtins.insert(
+//     "lowercase",
+//     Value::Function(Function::new("lowercase", lowercase_builtin)),
+// );
+// builtins.insert(
+//     "uppercase",
+//     Value::Function(Function::new("uppercase", uppercase_builtin)),
+// );
+// builtins.insert(
+//     "number",
+//     Value::Function(Function::new("number", number_builtin)),
+// );
+// builtins.insert(
+//     "strip",
+//     Value::Function(Function::new("strip", strip_builtin)),
+// );
+// builtins.insert(
+//     "range",
+//     Value::Function(Function::new("range", range_builtin)),
+// );
+// builtins.insert(
+//     "rstrip",
+//     Value::Function(Function::new("rstrip", rstrip_builtin)),
+// );
+// builtins.insert(
+//     "lstrip",
+//     Value::Function(Function::new("lstrip", lstrip_builtin)),
+// );
+// builtins.insert("join", Value::Function(Function::new("join", join_builtin)));
+// builtins.insert(
+//     "split",
+//     Value::Function(Function::new("split", split_builtin)),
+// );
+// builtins.insert(
+//     "fromNow",
+//     Value::Function(Function::new("fromNow", from_now_builtin)),
+// );
+// builtins.insert(
+//     "typeof",
+//     Value::Function(Function::new("typeof", typeof_builtin)),
+// );
+// builtins.insert(
+//     "defined",
+//     Value::Function(Function::new("defined", defined_builtin)),
+// );
+//         builtins
+//     };
+// }
 
 // utility functions
 
@@ -118,42 +118,42 @@ fn unary_string<F: Fn(&str) -> String>(args: &[Value], op: F) -> Result<Value> {
 
 // builtin implementations
 
-fn abs_builtin<'a>(_context: &Context, args: &'a [Value]) -> BoxFuture<'a, Result<Value>> {
-    async move { unary_arithmetic(args, f64::abs) }.boxed()
-}
+// fn abs_builtin<'a>(_context: &Context, args: &'a [Value]) -> BoxFuture<'a, Result<Value>> {
+//     async move { unary_arithmetic(args, f64::abs) }.boxed()
+// }
 
-fn str_builtin<'a>(_context: &Context, args: &'a [Value]) -> BoxFuture<'a, Result<Value>> {
-    async move {
-        if args.len() != 1 {
-            return Err(interpreter_error!("str expects one argument"));
-        }
-        let v = &args[0];
+// fn str_builtin<'a>(_context: &Context, args: &'a [Value]) -> BoxFuture<'a, Result<Value>> {
+//     async move {
+//         if args.len() != 1 {
+//             return Err(interpreter_error!("str expects one argument"));
+//         }
+//         let v = &args[0];
 
-        match v {
-            Value::Null | Value::String(_) | Value::Number(_) | Value::Bool(_) => {
-                v.stringify().map(|s| Value::String(s))
-            }
-            _ => Err(interpreter_error!("invalid arguments to builtin: str")),
-        }
-    }
-    .boxed()
-}
+//         match v {
+//             Value::Null | Value::String(_) | Value::Number(_) | Value::Bool(_) => {
+//                 v.stringify().map(|s| Value::String(s))
+//             }
+//             _ => Err(interpreter_error!("invalid arguments to builtin: str")),
+//         }
+//     }
+//     .boxed()
+// }
 
-fn len_builtin<'a>(_context: &Context, args: &'a [Value]) -> BoxFuture<'a, Result<Value>> {
-    async move {
-        if args.len() != 1 {
-            return Err(interpreter_error!("len expects one argument"));
-        }
-        let v = &args[0];
+// fn len_builtin<'a>(_context: &Context, args: &'a [Value]) -> BoxFuture<'a, Result<Value>> {
+//     async move {
+//         if args.len() != 1 {
+//             return Err(interpreter_error!("len expects one argument"));
+//         }
+//         let v = &args[0];
 
-        match v {
-            Value::String(s) => Ok(Value::Number(s.chars().count() as f64)),
-            Value::Array(a) => Ok(Value::Number(a.len() as f64)),
-            _ => Err(interpreter_error!("invalid arguments to builtin: len")),
-        }
-    }
-    .boxed()
-}
+//         match v {
+//             Value::String(s) => Ok(Value::Number(s.chars().count() as f64)),
+//             Value::Array(a) => Ok(Value::Number(a.len() as f64)),
+//             _ => Err(interpreter_error!("invalid arguments to builtin: len")),
+//         }
+//     }
+//     .boxed()
+// }
 
 fn min_builtin(_context: &Context, args: &[Value]) -> Result<Value> {
     array_arithmetic(args, |a, b| if a < b { a } else { b })

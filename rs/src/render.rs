@@ -1,5 +1,4 @@
 #![allow(unused_variables)]
-use crate::builtins::BUILTINS;
 use crate::fromnow::{from_now, now};
 use crate::interpreter::{self, Context};
 use crate::op_props::{parse_by, parse_each, parse_each_three};
@@ -21,7 +20,7 @@ use std::fmt::Write;
 
 /// Render the given JSON-e template with the given context.
 pub async fn render(template: &SerdeValue, context: &SerdeValue) -> Result<SerdeValue> {
-    let context = Context::from_serde_value(context, Some(&BUILTINS))?;
+    let context = Context::from_serde_value(context, None)?;
     render_with_context(template, &context).await
 }
 
