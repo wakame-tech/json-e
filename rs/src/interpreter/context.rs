@@ -24,7 +24,7 @@ impl<'a> Context<'a> {
 
     /// Create a child context, which will defer to the parent context when a value
     /// is not defined.
-    pub(crate) fn child(&'a self) -> Context<'a> {
+    pub fn child(&'a self) -> Context<'a> {
         Context {
             content: HashMap::new(),
             parent: Some(self),
